@@ -30,6 +30,11 @@ MAX_ARTIFACT_BYTES=10000000
 MAX_INPUT_FILE_BYTES=10000000
 ARTIFACT_TTL_SECONDS=900
 ALLOWED_UPLOAD_HOSTS=.oaiusercontent.com
+AUDIT_ENABLED=true
+AUDIT_DIR=/var/lib/mygpt-caddy/audit
+AUDIT_RETENTION_DAYS=30
+AUDIT_FSYNC=true
+AUDIT_OUTPUT_CHARS=4000
 ```
 
 可选：
@@ -45,6 +50,7 @@ ALLOWED_GPT_IDS=g-xxxxxxxx
 ```bash
 make check build
 sudo install -m 0755 bin/mygpt-caddy /usr/local/bin/mygpt-caddy
+sudo install -m 0755 bin/mygpt-audit /usr/local/bin/mygpt-audit
 sudo install -m 0644 deploy/mygpt-caddy.service /etc/systemd/system/mygpt-caddy.service
 sudo install -m 0600 deploy/mygpt-caddy.env.example /etc/mygpt-caddy.env
 sudo systemctl daemon-reload
@@ -54,9 +60,13 @@ sudo systemctl enable --now mygpt-caddy
 Caddy：
 
 ```bash
+sudo install -d -o caddy -g caddy -m 0750 /var/log/caddy
+sudo install -o caddy -g caddy -m 0600 /dev/null /var/log/caddy/mygpt-caddy-access.json
 sudo caddy validate --config /etc/caddy/Caddyfile
 sudo systemctl reload caddy
 ```
+
+先创建入口日志并设置 `caddy:caddy` 属主。否则以 root 执行 `caddy validate` 可能先创建 root-only 文件，导致 caddy 服务启动时报 `permission denied`。
 
 ## Custom GPT Builder
 
@@ -78,6 +88,7 @@ curl -sS https://action.example.com/openapi.json | jq .
 ```bash
 make check build
 sudo install -m 0755 bin/mygpt-caddy /usr/local/bin/mygpt-caddy
+sudo install -m 0755 bin/mygpt-audit /usr/local/bin/mygpt-audit
 sudo systemctl restart mygpt-caddy
 sudo systemctl is-active mygpt-caddy caddy
 ```
@@ -109,6 +120,8 @@ ss -ltnp | rg ':8787|:443'
 curl -sS http://127.0.0.1:8787/health
 curl -sS https://action.example.com/health
 caddy validate --config /etc/caddy/Caddyfile
+mygpt-audit verify
+mygpt-audit -limit 50 recent
 ```
 
 ## 防火墙与 OpenAI egress
@@ -116,4 +129,3 @@ caddy validate --config /etc/caddy/Caddyfile
 OpenAI 官方说明 Action 请求来自公开的 egress IP 范围。若 VPS 使用严格防火墙，应定期从官方页面更新 allowlist；最简单的 Action 兼容做法是只限制服务监听在本机、让 Caddy 暴露标准 443，并在防火墙层允许 HTTPS。
 
 不要把历史 IP 列表永久硬编码进项目，因为官方范围可能变化。
-

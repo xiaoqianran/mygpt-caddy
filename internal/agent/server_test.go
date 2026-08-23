@@ -3,6 +3,7 @@ package agent
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -13,23 +14,144 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/xiaoqianran/mygpt-caddy/internal/audit"
 )
 
-func testServer(t *testing.T, inline int) *Server {
+func testConfig(t *testing.T, inline int) Config {
 	t.Helper()
 	dir := t.TempDir()
-	cfg := Config{
+	return Config{
 		ListenAddr: "127.0.0.1:0", APIToken: "test-token", ActionBaseURL: "https://action.example.com",
 		WorkspaceRoot: dir, StateDir: filepath.Join(dir, "state"), CommandTimeout: 2 * time.Second,
 		InlineOutputChars: inline, MaxArtifactBytes: 10_000_000, ArtifactTTL: time.Minute,
 		MaxRequestBytes: 99_000, MaxInputFileBytes: 10_000_000,
 		AllowedGPTIDs: map[string]struct{}{}, AllowedUploadHosts: []string{".oaiusercontent.com"},
 	}
+}
+
+func testServer(t *testing.T, inline int) *Server {
+	t.Helper()
+	cfg := testConfig(t, inline)
 	s, err := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	return s
+}
+
+func TestAuditTraceRecordsFailuresWithoutSecrets(t *testing.T) {
+	cfg := testConfig(t, 30_000)
+	cfg.AuditEnabled = true
+	cfg.AuditDir = filepath.Join(cfg.StateDir, "audit")
+	cfg.AuditRetentionDays = 30
+	cfg.AuditFsync = true
+	cfg.AuditOutputChars = 100
+	s, err := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	unauthorized := call(t, s, `{"command":"pwd"}`, nil)
+	failed := call(t, s, `{"command":"echo trace-error >&2; exit 7","stdin":"private-stdin"}`, map[string]string{
+		"Authorization": "Bearer test-token", "Openai-Conversation-Id": "conversation-secret",
+	})
+	if unauthorized.Code != http.StatusUnauthorized || failed.Code != http.StatusOK {
+		t.Fatalf("unexpected statuses: %d, %d", unauthorized.Code, failed.Code)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	events, err := audit.Read(cfg.AuditDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result := audit.Verify(events); !result.Valid {
+		t.Fatalf("invalid audit chain: %+v", result)
+	}
+	encoded, _ := json.Marshal(events)
+	for _, secret := range []string{"test-token", "private-stdin", "conversation-secret"} {
+		if bytes.Contains(encoded, []byte(secret)) {
+			t.Fatalf("audit leaked %q", secret)
+		}
+	}
+	wanted := map[string]bool{
+		"authentication/failed": false, "request.validation/succeeded": false,
+		"execution.complete/failed": false, "request.completed/succeeded": false,
+	}
+	for _, event := range events {
+		key := event.Stage + "/" + event.Outcome
+		if _, ok := wanted[key]; ok {
+			wanted[key] = true
+		}
+	}
+	for key, seen := range wanted {
+		if !seen {
+			t.Errorf("missing audit event %s", key)
+		}
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return fn(req) }
+
+type failingAuditSink struct{}
+
+func (failingAuditSink) Append(audit.Event) error { return errors.New("audit disk unavailable") }
+func (failingAuditSink) Close() error             { return nil }
+
+func TestAuditFailureDoesNotBreakCommand(t *testing.T) {
+	s := testServer(t, 30_000)
+	s.audit = audit.NewRecorder(failingAuditSink{})
+	w := call(t, s, `{"command":"printf still-runs"}`, map[string]string{"Authorization": "Bearer test-token"})
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "still-runs") {
+		t.Fatalf("audit failure affected command: %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestInputDownloadIsTraced(t *testing.T) {
+	cfg := testConfig(t, 30_000)
+	cfg.AuditEnabled = true
+	cfg.AuditDir = filepath.Join(cfg.StateDir, "audit")
+	cfg.AuditRetentionDays = 30
+	cfg.AuditOutputChars = 0
+	s, err := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.uploadTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("downloaded-data")),
+			ContentLength: 15, Header: make(http.Header), Request: req,
+		}, nil
+	})
+	body := `{"command":"wc -c < \"$OPENAI_FILE_DIR/input.txt\"","openaiFileIdRefs":[{"name":"input.txt","id":"file-test","mime_type":"text/plain","download_link":"https://files.oaiusercontent.com/private?signature=must-not-leak"}]}`
+	w := call(t, s, body, map[string]string{"Authorization": "Bearer test-token"})
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"stdout":"15`) {
+		t.Fatalf("unexpected response %d: %s", w.Code, w.Body.String())
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	events, err := audit.Read(cfg.AuditDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, event := range events {
+		if event.Stage == "upload.download" && event.Outcome == "succeeded" {
+			found = event.Data["name"] == "input.txt" && event.Data["source_host"] == "files.oaiusercontent.com"
+		}
+	}
+	encoded, _ := json.Marshal(events)
+	if !found {
+		t.Fatal("missing successful upload.download audit event")
+	}
+	if bytes.Contains(encoded, []byte("signature=must-not-leak")) {
+		t.Fatal("audit leaked temporary download URL")
+	}
 }
 
 func call(t *testing.T, s *Server, body string, headers map[string]string) *httptest.ResponseRecorder {

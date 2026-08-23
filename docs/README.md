@@ -9,5 +9,6 @@
 - [故障排查](./05-troubleshooting.md)：Builder、超时、附件、鉴权、TLS 和命令错误。
 - [安全模型](./06-security.md)：root 执行风险、SSRF 防护、凭据管理和生产加固建议。
 - [Custom GPT 描述与指令](./07-gpt-description-and-instructions.md)：可直接粘贴到 Builder 的精简版本。
+- [全链路追溯与审计](./08-audit-tracing.md)：Caddy 入口、Go 阶段事件、文件与命令追踪、哈希链和查询 CLI。
 
 官方来源以 [OpenAI Production notes](https://developers.openai.com/api/docs/actions/production) 和 [Sending and returning files](https://developers.openai.com/api/docs/actions/sending-files) 为准；社区讨论用于补充踩坑，不替代官方契约。

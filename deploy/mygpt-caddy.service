@@ -12,9 +12,9 @@ EnvironmentFile=/etc/mygpt-caddy.env
 ExecStart=/usr/local/bin/mygpt-caddy
 Restart=on-failure
 RestartSec=3
+UMask=0077
 NoNewPrivileges=false
 PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
-

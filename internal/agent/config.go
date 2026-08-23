@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	Version             = "1.0.1"
+	Version             = "1.1.0"
 	defaultTimeout      = 38 * time.Second
 	defaultInlineChars  = 30_000
 	defaultArtifactSize = 10_000_000
@@ -32,15 +32,21 @@ type Config struct {
 	MaxInputFileBytes  int64
 	AllowedGPTIDs      map[string]struct{}
 	AllowedUploadHosts []string
+	AuditEnabled       bool
+	AuditDir           string
+	AuditRetentionDays int
+	AuditFsync         bool
+	AuditOutputChars   int
 }
 
 func LoadConfig() (Config, error) {
+	stateDir := env("STATE_DIR", "/var/lib/mygpt-caddy")
 	cfg := Config{
 		ListenAddr:         env("LISTEN_ADDR", "127.0.0.1:8787"),
 		APIToken:           strings.TrimSpace(os.Getenv("API_TOKEN")),
 		ActionBaseURL:      strings.TrimRight(strings.TrimSpace(os.Getenv("ACTION_BASE_URL")), "/"),
 		WorkspaceRoot:      env("WORKSPACE_ROOT", "/root"),
-		StateDir:           env("STATE_DIR", "/var/lib/mygpt-caddy"),
+		StateDir:           stateDir,
 		CommandTimeout:     secondsEnv("COMMAND_TIMEOUT_SECONDS", defaultTimeout),
 		InlineOutputChars:  intEnv("INLINE_OUTPUT_CHARS", defaultInlineChars),
 		MaxArtifactBytes:   int64Env("MAX_ARTIFACT_BYTES", defaultArtifactSize),
@@ -49,6 +55,11 @@ func LoadConfig() (Config, error) {
 		MaxInputFileBytes:  int64Env("MAX_INPUT_FILE_BYTES", defaultArtifactSize),
 		AllowedGPTIDs:      splitSet(os.Getenv("ALLOWED_GPT_IDS")),
 		AllowedUploadHosts: splitList(env("ALLOWED_UPLOAD_HOSTS", ".oaiusercontent.com")),
+		AuditEnabled:       boolEnv("AUDIT_ENABLED", true),
+		AuditDir:           env("AUDIT_DIR", filepath.Join(stateDir, "audit")),
+		AuditRetentionDays: intEnv("AUDIT_RETENTION_DAYS", 30),
+		AuditFsync:         boolEnv("AUDIT_FSYNC", true),
+		AuditOutputChars:   intEnv("AUDIT_OUTPUT_CHARS", 4_000),
 	}
 	if cfg.APIToken == "" {
 		return Config{}, errors.New("API_TOKEN is required")
@@ -64,6 +75,12 @@ func LoadConfig() (Config, error) {
 	}
 	if cfg.MaxInputFileBytes < 1 || cfg.MaxInputFileBytes > defaultArtifactSize {
 		return Config{}, fmt.Errorf("MAX_INPUT_FILE_BYTES must be between 1 and %d", defaultArtifactSize)
+	}
+	if cfg.AuditRetentionDays < 1 || cfg.AuditRetentionDays > 3650 {
+		return Config{}, errors.New("AUDIT_RETENTION_DAYS must be between 1 and 3650")
+	}
+	if cfg.AuditOutputChars < 0 || cfg.AuditOutputChars > 20_000 {
+		return Config{}, errors.New("AUDIT_OUTPUT_CHARS must be between 0 and 20000")
 	}
 	if cfg.ActionBaseURL != "" {
 		u, err := url.Parse(cfg.ActionBaseURL)
@@ -112,6 +129,18 @@ func int64Env(name string, fallback int64) int64 {
 		return fallback
 	}
 	return value
+}
+
+func boolEnv(name string, fallback bool) bool {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
 }
 
 func splitList(value string) []string {

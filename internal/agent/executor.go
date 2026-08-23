@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -38,17 +40,26 @@ type commandResponse struct {
 func (s *Server) execute(ctx context.Context, req commandRequest, startDir, inputDir string, files []savedFile, meta requestMeta) (commandResponse, error) {
 	workdir, err := resolveWorkdir(startDir, req.Workdir)
 	if err != nil {
+		s.auditEvent(ctx, "execution.prepare", "failed", map[string]any{"requested_workdir": req.Workdir, "error": err.Error()})
 		return commandResponse{}, err
 	}
+	deadline, _ := ctx.Deadline()
+	s.auditEvent(ctx, "execution.prepare", "succeeded", map[string]any{
+		"workdir": workdir, "input_file_count": len(files),
+		"timeout_ms": time.Until(deadline).Milliseconds(),
+	})
 	stdoutCapture, stdoutArtifact, err := s.artifacts.newCapture("stdout")
 	if err != nil {
+		s.auditEvent(ctx, "output.capture", "failed", map[string]any{"stream": "stdout", "error": err.Error()})
 		return commandResponse{}, err
 	}
 	stderrCapture, stderrArtifact, err := s.artifacts.newCapture("stderr")
 	if err != nil {
 		s.artifacts.discard(stdoutArtifact)
+		s.auditEvent(ctx, "output.capture", "failed", map[string]any{"stream": "stderr", "error": err.Error()})
 		return commandResponse{}, err
 	}
+	s.auditEvent(ctx, "output.capture", "ready", map[string]any{"max_bytes_per_stream": s.cfg.MaxArtifactBytes})
 	defer func() {
 		_ = closeCapture(stdoutCapture)
 		_ = closeCapture(stderrCapture)
@@ -78,8 +89,10 @@ func (s *Server) execute(ctx context.Context, req commandRequest, startDir, inpu
 	if err := cmd.Start(); err != nil {
 		s.artifacts.discard(stdoutArtifact)
 		s.artifacts.discard(stderrArtifact)
+		s.auditEvent(ctx, "execution.start", "failed", map[string]any{"error": err.Error()})
 		return commandResponse{}, fmt.Errorf("start command: %w", err)
 	}
+	s.auditEvent(ctx, "execution.start", "succeeded", map[string]any{"pid": cmd.Process.Pid, "process_group": cmd.Process.Pid})
 	waitCh := make(chan error, 1)
 	go func() { waitCh <- cmd.Wait() }()
 	var waitErr error
@@ -88,6 +101,9 @@ func (s *Server) execute(ctx context.Context, req commandRequest, startDir, inpu
 	case waitErr = <-waitCh:
 	case <-ctx.Done():
 		timedOut = errors.Is(ctx.Err(), context.DeadlineExceeded)
+		s.auditEvent(ctx, "execution.interrupt", map[bool]string{true: "timed_out", false: "canceled"}[timedOut], map[string]any{
+			"signal": "SIGKILL", "process_group": cmd.Process.Pid, "context_error": ctx.Err().Error(),
+		})
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		waitErr = <-waitCh
 	}
@@ -117,8 +133,32 @@ func (s *Server) execute(ctx context.Context, req commandRequest, startDir, inpu
 		Workdir: finalDir, InputFiles: files,
 		OutputTruncated: stdoutCapture.truncated || stderrCapture.truncated,
 	}
+	stdoutHash, stdoutHashErr := fileSHA256(stdoutArtifact.path)
+	stderrHash, stderrHashErr := fileSHA256(stderrArtifact.path)
+	executionOutcome := "succeeded"
+	if timedOut {
+		executionOutcome = "timed_out"
+	} else if exitCode != 0 {
+		executionOutcome = "failed"
+	}
+	executionData := map[string]any{
+		"exit_code": exitCode, "timed_out": timedOut, "duration_ms": duration.Milliseconds(),
+		"workdir": finalDir, "stdout_bytes": stdoutCapture.written, "stderr_bytes": stderrCapture.written,
+		"stdout_sha256": stdoutHash, "stderr_sha256": stderrHash,
+		"stdout_tail":      tailFile(stdoutArtifact.path, s.cfg.AuditOutputChars),
+		"stderr_tail":      tailFile(stderrArtifact.path, s.cfg.AuditOutputChars),
+		"output_truncated": resp.OutputTruncated,
+	}
+	if stdoutHashErr != nil {
+		executionData["stdout_hash_error"] = stdoutHashErr.Error()
+	}
+	if stderrHashErr != nil {
+		executionData["stderr_hash_error"] = stderrHashErr.Error()
+	}
+	s.auditEvent(ctx, "execution.complete", executionOutcome, executionData)
 	totalChars, err := capturedChars(stdoutArtifact.path, stderrArtifact.path)
 	if err != nil {
+		s.auditEvent(ctx, "output.route", "failed", map[string]any{"error": err.Error()})
 		return commandResponse{}, err
 	}
 	if totalChars <= s.cfg.InlineOutputChars && !resp.OutputTruncated {
@@ -128,6 +168,9 @@ func (s *Server) execute(ctx context.Context, req commandRequest, startDir, inpu
 		}
 		s.artifacts.discard(stdoutArtifact)
 		s.artifacts.discard(stderrArtifact)
+		s.auditEvent(ctx, "output.route", outcomeFromError(err), map[string]any{
+			"mode": "inline", "characters": totalChars, "error": errorText(err),
+		})
 		return resp, err
 	}
 
@@ -136,6 +179,7 @@ func (s *Server) execute(ctx context.Context, req commandRequest, startDir, inpu
 		resp.Stdout = tailFile(stdoutArtifact.path, 4_000)
 		published := s.artifacts.publish(stdoutArtifact, stdoutCapture.written)
 		resp.OpenAIFileResponse = append(resp.OpenAIFileResponse, s.artifacts.URL(baseURL, published))
+		s.auditEvent(ctx, "output.artifact", "published", artifactAuditData("stdout", published))
 	} else {
 		s.artifacts.discard(stdoutArtifact)
 	}
@@ -143,10 +187,34 @@ func (s *Server) execute(ctx context.Context, req commandRequest, startDir, inpu
 		resp.Stderr = tailFile(stderrArtifact.path, 4_000)
 		published := s.artifacts.publish(stderrArtifact, stderrCapture.written)
 		resp.OpenAIFileResponse = append(resp.OpenAIFileResponse, s.artifacts.URL(baseURL, published))
+		s.auditEvent(ctx, "output.artifact", "published", artifactAuditData("stderr", published))
 	} else {
 		s.artifacts.discard(stderrArtifact)
 	}
+	s.auditEvent(ctx, "output.route", "succeeded", map[string]any{
+		"mode": "attachments", "characters": totalChars, "attachment_count": len(resp.OpenAIFileResponse),
+	})
 	return resp, nil
+}
+
+func artifactAuditData(stream string, value artifact) map[string]any {
+	return map[string]any{
+		"stream": stream, "artifact_id": value.id, "name": value.name, "mime_type": value.mime,
+		"bytes": value.size, "expires_at": value.expires.UTC().Format(time.RFC3339Nano),
+	}
+}
+
+func fileSHA256(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	digest := sha256.New()
+	if _, err := io.Copy(digest, file); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(digest.Sum(nil)), nil
 }
 
 func resolveWorkdir(current, requested string) (string, error) {

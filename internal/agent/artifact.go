@@ -118,19 +118,24 @@ func (s *artifactStore) URL(baseURL string, a artifact) string {
 }
 
 func (s *artifactStore) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
 	if r.Method != http.MethodGet {
+		_ = appendAudit(r.Context(), "artifact.download", "failed", map[string]any{"reason": "method_not_allowed", "method": r.Method})
 		w.Header().Set("Allow", http.MethodGet)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/v1/files/download/"), "/")
 	if len(parts) != 2 {
+		_ = appendAudit(r.Context(), "artifact.download", "failed", map[string]any{"reason": "invalid_path"})
 		http.NotFound(w, r)
 		return
 	}
 	id, name := parts[0], parts[1]
+	_ = appendAudit(r.Context(), "artifact.download", "started", map[string]any{"artifact_id": id, "name": name})
 	expires, err := strconv.ParseInt(r.URL.Query().Get("expires"), 10, 64)
 	if err != nil || time.Now().Unix() > expires {
+		_ = appendAudit(r.Context(), "artifact.download", "failed", map[string]any{"artifact_id": id, "name": name, "reason": "expired"})
 		http.Error(w, "link expired", http.StatusGone)
 		return
 	}
@@ -138,6 +143,7 @@ func (s *artifactStore) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_, _ = io.WriteString(mac, id+"\x00"+name+"\x00"+strconv.FormatInt(expires, 10))
 	want, err := hex.DecodeString(r.URL.Query().Get("signature"))
 	if err != nil || !hmac.Equal(want, mac.Sum(nil)) {
+		_ = appendAudit(r.Context(), "artifact.download", "failed", map[string]any{"artifact_id": id, "name": name, "reason": "invalid_signature"})
 		http.Error(w, "invalid signature", http.StatusForbidden)
 		return
 	}
@@ -145,11 +151,13 @@ func (s *artifactStore) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	a, ok := s.items[id]
 	s.mu.Unlock()
 	if !ok || a.name != name || a.expires.Unix() != expires {
+		_ = appendAudit(r.Context(), "artifact.download", "failed", map[string]any{"artifact_id": id, "name": name, "reason": "not_found"})
 		http.NotFound(w, r)
 		return
 	}
 	file, err := os.Open(a.path)
 	if err != nil {
+		_ = appendAudit(r.Context(), "artifact.download", "failed", map[string]any{"artifact_id": id, "name": name, "reason": "open_failed", "error": err.Error()})
 		http.NotFound(w, r)
 		return
 	}
@@ -160,7 +168,12 @@ func (s *artifactStore) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Length", strconv.FormatInt(a.size, 10))
 	w.Header().Set("Cache-Control", "private, max-age=60")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	_, _ = io.Copy(w, file)
+	written, copyErr := io.Copy(w, file)
+	data := map[string]any{
+		"artifact_id": id, "name": name, "bytes": written,
+		"duration_ms": time.Since(started).Milliseconds(), "error": errorText(copyErr),
+	}
+	_ = appendAudit(r.Context(), "artifact.download", outcomeFromError(copyErr), data)
 }
 
 func (s *artifactStore) cleanupLoop() {

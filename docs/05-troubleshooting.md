@@ -14,7 +14,16 @@
 
 不能是 `http://127.0.0.1:8787`。这里的 localhost 指 OpenAI 执行 Action 的环境，不是你的 VPS。
 
-Builder 可能保留旧 Action/Schema 缓存。处理顺序：删除旧 Action、保存 GPT、重新添加 Action、重新导入当前 `/openapi.json`、重新设置 Bearer token，再保存 GPT。当前服务响应带 `X-Request-Id`，所有非健康检查请求会在 systemd 日志记录 status，但绝不记录 token。
+Builder 可能保留旧 Action/Schema 缓存。处理顺序：删除旧 Action、保存 GPT、重新添加 Action、重新导入当前 `/openapi.json`、重新设置 Bearer token，再保存 GPT。当前服务响应带 `X-Request-Id`，所有非健康检查请求进入可校验的审计链，但绝不记录 token 或临时下载链接。
+
+先看公网入口：
+
+```bash
+sudo tail -n 100 /var/log/caddy/mygpt-caddy-access.json | jq -c .
+sudo mygpt-audit -limit 100 recent
+```
+
+两处都没有对应时段的 `POST /v1/command/run`，就能确认请求尚未到 VPS；继续修改 Bash 或 Go 服务不会解决该错误。
 
 ## Builder 无法导入 Schema
 

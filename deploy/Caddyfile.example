@@ -1,10 +1,24 @@
 action.example.com {
 	encode zstd gzip
+	# 首次启用前，以 caddy:caddy、0600 预创建此文件；见 docs/04。
+	log {
+		output file /var/log/caddy/mygpt-caddy-access.json {
+			mode 0600
+			roll_size 20MiB
+			roll_at 00:00
+			roll_keep 30
+			roll_keep_for 720h
+		}
+		format json
+	}
+	@skipAccessLog path /health /v1/files/download/*
+	log_skip @skipAccessLog
+	log_append trace_id {http.request.uuid}
 	reverse_proxy 127.0.0.1:8787 {
+		header_up X-Request-Id {http.request.uuid}
 		transport http {
 			keepalive 30s
 			response_header_timeout 40s
 		}
 	}
 }
-

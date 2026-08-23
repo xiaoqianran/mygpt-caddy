@@ -118,3 +118,4 @@ OPENAI_GPT_ID
 
 这些变量面向 VPS 上的命令脚本，不是对 ChatGPT 的额外协议承诺。
 
+Caddy 入口与 Go 阶段事件通过同一个 `trace_id` 关联。完整事件、隐私边界和查询方法见[全链路追溯与审计](./08-audit-tracing.md)。

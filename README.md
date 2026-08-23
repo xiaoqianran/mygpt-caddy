@@ -2,7 +2,7 @@
 
 一个供 Custom GPT Action 调用的轻量 Go 命令执行引擎。Caddy 负责公网 HTTPS，服务只监听 `127.0.0.1:8787`。
 
-详细参考见 [docs/](./docs/README.md)：包含官方兼容性矩阵、架构、双向文件处理、部署运维、故障排查和安全模型。
+详细参考见 [docs/](./docs/README.md)：包含官方兼容性矩阵、架构、双向文件处理、部署运维、故障排查、安全模型和全链路审计。
 
 ## 设计
 
@@ -14,6 +14,7 @@
 - 接收 `openaiFileIdRefs`，并立即下载到临时目录；命令通过 `$OPENAI_FILE_DIR` 和 `$OPENAI_FILE_PATHS_JSON` 使用文件。
 - Bearer 鉴权；可选 `ALLOWED_GPT_IDS`；上传下载域名默认仅允许 `*.oaiusercontent.com`。
 - Shell 退出码非零仍返回 HTTP 200，方便 GPT 读取错误并修正；协议错误使用 400，鉴权错误使用 401。
+- Caddy 公网入口日志与 Go JSONL 审计链共享 `trace_id`；记录鉴权、下载、执行、输出与失败阶段，并提供独立校验 CLI。
 
 > 这是远程 shell，不是沙箱。当前部署以 root 运行，Bearer token 等同于 VPS root 权限。只连接你信任的私有 GPT，并使用长随机 token。
 
@@ -22,6 +23,7 @@
 ```bash
 make check build
 sudo install -m 0755 bin/mygpt-caddy /usr/local/bin/mygpt-caddy
+sudo install -m 0755 bin/mygpt-audit /usr/local/bin/mygpt-audit
 sudo install -m 0644 deploy/mygpt-caddy.service /etc/systemd/system/mygpt-caddy.service
 sudo install -m 0600 deploy/mygpt-caddy.env.example /etc/mygpt-caddy.env
 sudo systemctl daemon-reload

@@ -25,6 +25,11 @@ func main() {
 		log.Error("initialize service", "error", err)
 		os.Exit(1)
 	}
+	defer func() {
+		if err := handler.Close(); err != nil {
+			log.Error("close audit sink", "error", err)
+		}
+	}()
 
 	server := &http.Server{
 		Addr:              cfg.ListenAddr,
