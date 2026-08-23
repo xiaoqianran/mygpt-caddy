@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "MyGPT Caddy VPS Command API",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "description": "Runs authenticated, bounded, non-interactive Bash workflows on the connected VPS."
   },
   "servers": [
@@ -114,4 +114,3 @@
     }
   }
 }
-

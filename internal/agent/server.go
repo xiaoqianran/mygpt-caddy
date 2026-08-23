@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 )
 
 //go:embed openapi.json
@@ -27,6 +28,31 @@ type Server struct {
 
 type requestMeta struct {
 	requestID, conversationID, userID, gptID, baseURL string
+}
+
+type requestIDKey struct{}
+
+type responseStats struct {
+	http.ResponseWriter
+	status int
+	bytes  int
+}
+
+func (w *responseStats) WriteHeader(status int) {
+	if w.status != 0 {
+		return
+	}
+	w.status = status
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *responseStats) Write(data []byte) (int, error) {
+	if w.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	n, err := w.ResponseWriter.Write(data)
+	w.bytes += n
+	return n, err
 }
 
 func New(cfg Config, log *slog.Logger) (*Server, error) {
@@ -50,9 +76,38 @@ func New(cfg Config, log *slog.Logger) (*Server, error) {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
+	requestID, err := randomID()
+	if err != nil {
+		requestID = "unavailable"
+	}
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Cache-Control", "no-store")
-	s.mux.ServeHTTP(w, r)
+	w.Header().Set("X-Request-Id", requestID)
+	stats := &responseStats{ResponseWriter: w}
+	ctx := context.WithValue(r.Context(), requestIDKey{}, requestID)
+	s.mux.ServeHTTP(stats, r.WithContext(ctx))
+	if stats.status == 0 {
+		stats.status = http.StatusOK
+	}
+	if r.URL.Path == "/health" && stats.status < http.StatusBadRequest {
+		return
+	}
+	fields := []any{
+		"request_id", requestID,
+		"method", r.Method,
+		"path", r.URL.Path,
+		"status", stats.status,
+		"bytes", stats.bytes,
+		"duration_ms", time.Since(started).Milliseconds(),
+		"authorization_present", r.Header.Get("Authorization") != "",
+		"gpt_id_present", r.Header.Get("Openai-Gpt-Id") != "",
+	}
+	if stats.status >= http.StatusBadRequest {
+		s.log.Warn("http request", fields...)
+	} else {
+		s.log.Info("http request", fields...)
+	}
 }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
@@ -104,10 +159,14 @@ func (s *Server) runCommand(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "command is required")
 		return
 	}
-	requestID, err := randomID()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "cannot create request ID")
-		return
+	requestID, _ := r.Context().Value(requestIDKey{}).(string)
+	if requestID == "" {
+		generatedID, generateErr := randomID()
+		if generateErr != nil {
+			writeError(w, http.StatusInternalServerError, "cannot create request ID")
+			return
+		}
+		requestID = generatedID
 	}
 	baseURL, err := s.publicBaseURL(r)
 	if err != nil {

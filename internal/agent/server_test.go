@@ -115,6 +115,8 @@ func TestAuthAndStrictJSON(t *testing.T) {
 	s := testServer(t, 30_000)
 	if w := call(t, s, `{"command":"true"}`, nil); w.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d", w.Code)
+	} else if w.Header().Get("X-Request-Id") == "" {
+		t.Fatal("missing request correlation ID")
 	}
 	w := call(t, s, `{"command":"true","unknown":1}`, map[string]string{"Authorization": "Bearer test-token"})
 	if w.Code != http.StatusBadRequest {

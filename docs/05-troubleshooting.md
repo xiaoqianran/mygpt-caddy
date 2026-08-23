@@ -1,5 +1,21 @@
 # 故障排查
 
+## `ClientResponseError` 且 VPS 没有请求日志
+
+优先检查 Builder 保存的 Schema 中 `servers[0].url`。它必须是公网 HTTPS origin：
+
+```json
+{
+  "servers": [
+    { "url": "https://mygpt-caddy-sg.202820.xyz" }
+  ]
+}
+```
+
+不能是 `http://127.0.0.1:8787`。这里的 localhost 指 OpenAI 执行 Action 的环境，不是你的 VPS。
+
+Builder 可能保留旧 Action/Schema 缓存。处理顺序：删除旧 Action、保存 GPT、重新添加 Action、重新导入当前 `/openapi.json`、重新设置 Bearer token，再保存 GPT。当前服务响应带 `X-Request-Id`，所有非健康检查请求会在 systemd 日志记录 status，但绝不记录 token。
+
 ## Builder 无法导入 Schema
 
 检查：
@@ -110,4 +126,3 @@ curl -Iv https://你的域名/health
 ```
 
 Caddy site block 必须使用域名而不是 `http://` 前缀，并且 DNS 必须指向 VPS。OpenAI Action 不支持带 `:8787` 的公网 URL。
-
