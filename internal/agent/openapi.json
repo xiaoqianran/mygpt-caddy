@@ -1,0 +1,117 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "MyGPT Caddy VPS Command API",
+    "version": "1.0.0",
+    "description": "Runs authenticated, bounded, non-interactive Bash workflows on the connected VPS."
+  },
+  "servers": [
+    { "url": "{{ACTION_BASE_URL}}" }
+  ],
+  "security": [
+    { "BearerAuth": [] }
+  ],
+  "paths": {
+    "/v1/command/run": {
+      "post": {
+        "operationId": "runCommand",
+        "summary": "Run a Bash workflow on the VPS",
+        "description": "Runs one non-interactive Bash command or script. The current directory persists per OpenAI conversation. Nonzero shell exits are returned as HTTP 200 results. Large output is attached as downloadable text files.",
+        "x-openai-isConsequential": false,
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/CommandRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Command result. Inspect exit_code, stderr, timed_out, and output_truncated.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CommandResponse" }
+              }
+            }
+          },
+          "400": { "description": "Malformed JSON, invalid workdir, or invalid file reference." },
+          "401": { "description": "Missing or invalid Bearer token." }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "BearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "opaque"
+      }
+    },
+    "schemas": {
+      "CommandRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["command"],
+        "properties": {
+          "command": {
+            "type": "string",
+            "description": "Bash command or multiline script. Uploaded files are available in $OPENAI_FILE_DIR; metadata and absolute paths are JSON in $OPENAI_FILE_PATHS_JSON."
+          },
+          "workdir": {
+            "type": "string",
+            "description": "Optional absolute path or path relative to the conversation's current directory."
+          },
+          "stdin": {
+            "type": "string",
+            "description": "Optional standard input for the command."
+          },
+          "timeout_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 38,
+            "description": "Optional shorter timeout. The server always caps execution at 38 seconds."
+          },
+          "openaiFileIdRefs": {
+            "type": "array",
+            "maxItems": 10,
+            "items": { "type": "string" },
+            "description": "Up to 10 files from this conversation needed by the command. ChatGPT expands these references into temporary download objects at runtime."
+          }
+        }
+      },
+      "CommandResponse": {
+        "type": "object",
+        "required": ["exit_code", "stdout", "stderr", "timed_out", "output_truncated", "duration_ms", "workdir"],
+        "properties": {
+          "exit_code": { "type": "integer", "description": "Shell exit code; nonzero is a command failure, not an HTTP failure." },
+          "stdout": { "type": "string", "description": "Full inline stdout or a short tail when the full stream is attached." },
+          "stderr": { "type": "string", "description": "Full inline stderr or a short tail when the full stream is attached." },
+          "timed_out": { "type": "boolean" },
+          "output_truncated": { "type": "boolean", "description": "True only when output exceeded the per-file 10 MB safety cap." },
+          "duration_ms": { "type": "integer", "minimum": 0 },
+          "workdir": { "type": "string", "description": "Conversation working directory after the command." },
+          "input_files": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": { "type": "string" },
+                "id": { "type": "string" },
+                "mime_type": { "type": "string" },
+                "path": { "type": "string" }
+              }
+            }
+          },
+          "openaiFileResponse": {
+            "type": "array",
+            "items": { "type": "string", "format": "uri" },
+            "description": "Signed URLs for full text output files when inline output would be too large."
+          }
+        }
+      }
+    }
+  }
+}
+

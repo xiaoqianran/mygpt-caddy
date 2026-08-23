@@ -1,0 +1,10 @@
+action.example.com {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:8787 {
+		transport http {
+			keepalive 30s
+			response_header_timeout 40s
+		}
+	}
+}
+
