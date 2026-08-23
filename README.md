@@ -2,6 +2,8 @@
 
 一个供 Custom GPT Action 调用的轻量 Go 命令执行引擎。Caddy 负责公网 HTTPS，服务只监听 `127.0.0.1:8787`。
 
+详细参考见 [docs/](./docs/README.md)：包含官方兼容性矩阵、架构、双向文件处理、部署运维、故障排查和安全模型。
+
 ## 设计
 
 - 一个 `runCommand` operation，保持 OpenAPI 与模型调用简单稳定。
